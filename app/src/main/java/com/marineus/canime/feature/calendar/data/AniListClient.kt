@@ -8,31 +8,52 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 internal class AniListClient {
-    fun fetchBirthdayCharacters(username: String): List<BirthdayCharacter> {
+    fun fetchBirthdayCharacters(username: String): CharacterFetchResult {
         val mediaIds = fetchMediaIds(username)
-        if (mediaIds.isEmpty()) return emptyList()
+        if (mediaIds.isEmpty()) return CharacterFetchResult(emptyList(), emptyList())
 
         val characters = linkedMapOf<Int, MutableCharacter>()
         mediaIds.distinct().chunked(MEDIA_BATCH_SIZE).forEach { batch ->
-            val variables = JSONObject().put("mediaIds", JSONArray(batch))
-            val response = execute(MEDIA_CHARACTERS_QUERY, variables)
-            val mediaItems = response.getJSONObject("data").getJSONObject("Page").getJSONArray("media")
-            repeat(mediaItems.length()) { mediaIndex ->
-                addMediaCharacters(mediaItems.getJSONObject(mediaIndex), characters)
-            }
+            var characterPage = 1
+            do {
+                var hasNextPage = false
+                val variables = JSONObject()
+                    .put("mediaIds", JSONArray(batch))
+                    .put("characterPage", characterPage)
+                val response = execute(MEDIA_CHARACTERS_QUERY, variables)
+                val mediaItems = response.getJSONObject("data").getJSONObject("Page").getJSONArray("media")
+                repeat(mediaItems.length()) { mediaIndex ->
+                    hasNextPage = addMediaCharacters(mediaItems.getJSONObject(mediaIndex), characters) || hasNextPage
+                }
+                characterPage++
+            } while (hasNextPage)
         }
 
-        return characters.values.map { character ->
+        val birthdays = characters.values.mapNotNull { character ->
+            val month = character.birthMonth.takeIf { it in 1..12 } ?: return@mapNotNull null
+            val day = character.birthDay.takeIf { it in 1..31 } ?: return@mapNotNull null
             BirthdayCharacter(
                 id = character.id,
                 name = character.name,
                 imageUrl = character.imageUrl,
-                birthMonth = character.birthMonth,
-                birthDay = character.birthDay,
+                birthMonth = month,
+                birthDay = day,
                 siteUrl = character.siteUrl,
                 mediaTitles = character.mediaTitles.sorted(),
             )
         }
+        val missingBirthdays = characters.values
+            .filter { it.birthMonth !in 1..12 || it.birthDay !in 1..31 }
+            .map { character ->
+                MissingBirthdayCharacter(
+                    id = character.id,
+                    name = character.name,
+                    imageUrl = character.imageUrl,
+                    siteUrl = character.siteUrl,
+                    mediaTitles = character.mediaTitles.sorted(),
+                )
+            }
+        return CharacterFetchResult(birthdays, missingBirthdays)
     }
 
     private fun fetchMediaIds(username: String): List<Int> {
@@ -73,15 +94,15 @@ internal class AniListClient {
     private fun addMediaCharacters(
         media: JSONObject,
         characters: MutableMap<Int, MutableCharacter>,
-    ) {
+    ): Boolean {
         val mediaTitle = media.getJSONObject("title").optString("userPreferred")
-        val nodes = media.getJSONObject("characters").getJSONArray("nodes")
+        val characterConnection = media.getJSONObject("characters")
+        val nodes = characterConnection.getJSONArray("nodes")
         repeat(nodes.length()) { nodeIndex ->
             val node = nodes.getJSONObject(nodeIndex)
-            val date = node.optJSONObject("dateOfBirth") ?: return@repeat
-            val month = date.optInt("month")
-            val day = date.optInt("day")
-            if (month !in 1..12 || day !in 1..31) return@repeat
+            val date = node.optJSONObject("dateOfBirth")
+            val month = date?.optInt("month") ?: 0
+            val day = date?.optInt("day") ?: 0
 
             val id = node.getInt("id")
             val character = characters.getOrPut(id) {
@@ -96,6 +117,7 @@ internal class AniListClient {
             }
             if (mediaTitle.isNotBlank()) character.mediaTitles += mediaTitle
         }
+        return characterConnection.getJSONObject("pageInfo").optBoolean("hasNextPage")
     }
 
     private fun execute(query: String, variables: JSONObject): JSONObject {
@@ -158,11 +180,12 @@ internal class AniListClient {
         const val DOLLAR = '$'
 
         val MEDIA_CHARACTERS_QUERY = """
-            query (${DOLLAR}mediaIds: [Int]) {
+            query (${DOLLAR}mediaIds: [Int], ${DOLLAR}characterPage: Int) {
               Page(page: 1, perPage: 50) {
                 media(id_in: ${DOLLAR}mediaIds) {
                   title { userPreferred }
-                  characters(page: 1, perPage: 25, sort: [ROLE, RELEVANCE, ID]) {
+                  characters(page: ${DOLLAR}characterPage, perPage: 25, sort: [ROLE, RELEVANCE, ID]) {
+                    pageInfo { hasNextPage }
                     nodes {
                       id
                       name { full }

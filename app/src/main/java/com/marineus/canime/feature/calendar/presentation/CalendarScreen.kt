@@ -1,5 +1,12 @@
 package com.marineus.canime.feature.calendar.presentation
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,9 +37,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -177,10 +182,62 @@ fun CalendarScreen(
     onSyncClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    var showDataRequests by rememberSaveable { mutableStateOf(false) }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val isTablet = minOf(maxWidth, maxHeight) >= 600.dp
-            if (isTablet && maxWidth > maxHeight) {
+            AnimatedContent(
+                targetState = showDataRequests,
+                modifier = Modifier.fillMaxSize(),
+                transitionSpec = {
+                    if (targetState) {
+                        (slideInHorizontally(tween(320)) { fullWidth -> fullWidth } + fadeIn(tween(220)))
+                            .togetherWith(
+                                slideOutHorizontally(tween(320)) { fullWidth -> -fullWidth / 3 } +
+                                    fadeOut(tween(180)),
+                            )
+                    } else {
+                        (slideInHorizontally(tween(320)) { fullWidth -> -fullWidth / 3 } + fadeIn(tween(220)))
+                            .togetherWith(
+                                slideOutHorizontally(tween(320)) { fullWidth -> fullWidth } +
+                                    fadeOut(tween(180)),
+                            )
+                    }
+                },
+                label = "calendar-data-navigation",
+            ) { dataRequestsVisible ->
+            if (dataRequestsVisible) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                ) {
+                    DataRequestsTitle(
+                        onBackClick = { showDataRequests = false },
+                    )
+                    DataRequestsScreen(
+                        requests = listOf(
+                            DataRequestItem(
+                                id = "anilist-birthdays",
+                                title = "Kullanıcı adıyla veri çek",
+                                description = "Anime ve manga listenizdeki karakterlerin doğum günlerini alır.",
+                                inputLabel = "AniList kullanıcı adı",
+                                input = state.username,
+                                actionLabel = "Senkronize et",
+                                isRunning = state.isSyncing,
+                                message = state.syncMessage,
+                                error = state.syncError,
+                                onInputChange = onUsernameChange,
+                                onRun = onSyncClick,
+                            ),
+                        ),
+                        isDarkTheme = isDarkTheme,
+                        onThemeToggle = onThemeToggle,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            } else if (isTablet && maxWidth > maxHeight) {
                 LandscapeTabletCalendar(
                     state = state,
                     maxScreenWidth = maxWidth,
@@ -189,10 +246,7 @@ fun CalendarScreen(
                     onNextMonth = onNextMonth,
                     onTodayClick = onTodayClick,
                     onDateSelected = onDateSelected,
-                    isDarkTheme = isDarkTheme,
-                    onThemeToggle = onThemeToggle,
-                    onUsernameChange = onUsernameChange,
-                    onSyncClick = onSyncClick,
+                    onDataRequestsClick = { showDataRequests = true },
                 )
             } else {
                 StackedCalendar(
@@ -202,11 +256,9 @@ fun CalendarScreen(
                     onNextMonth = onNextMonth,
                     onTodayClick = onTodayClick,
                     onDateSelected = onDateSelected,
-                    isDarkTheme = isDarkTheme,
-                    onThemeToggle = onThemeToggle,
-                    onUsernameChange = onUsernameChange,
-                    onSyncClick = onSyncClick,
+                    onDataRequestsClick = { showDataRequests = true },
                 )
+            }
             }
         }
     }
@@ -221,10 +273,7 @@ private fun LandscapeTabletCalendar(
     onNextMonth: () -> Unit,
     onTodayClick: () -> Unit,
     onDateSelected: (LocalDate) -> Unit,
-    isDarkTheme: Boolean,
-    onThemeToggle: () -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onSyncClick: () -> Unit,
+    onDataRequestsClick: () -> Unit,
 ) {
     // Card header + weekday bar use roughly 170 dp. The remaining height defines
     // the largest possible 7x6 square grid that fits without scrolling.
@@ -238,7 +287,7 @@ private fun LandscapeTabletCalendar(
             .statusBarsPadding()
             .padding(horizontal = 12.dp, vertical = 16.dp),
     ) {
-        CalendarTitle(isDarkTheme = isDarkTheme, onThemeToggle = onThemeToggle)
+        CalendarTitle(onDataRequestsClick = onDataRequestsClick)
         Spacer(Modifier.height(14.dp))
         Row(
             modifier = Modifier.fillMaxSize(),
@@ -254,8 +303,6 @@ private fun LandscapeTabletCalendar(
             )
             SelectedDayPanel(
                 state = state,
-                onUsernameChange = onUsernameChange,
-                onSyncClick = onSyncClick,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight(),
@@ -272,10 +319,7 @@ private fun StackedCalendar(
     onNextMonth: () -> Unit,
     onTodayClick: () -> Unit,
     onDateSelected: (LocalDate) -> Unit,
-    isDarkTheme: Boolean,
-    onThemeToggle: () -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onSyncClick: () -> Unit,
+    onDataRequestsClick: () -> Unit,
 ) {
     val contentModifier = if (isTablet) {
         Modifier.fillMaxSize()
@@ -290,7 +334,7 @@ private fun StackedCalendar(
             .statusBarsPadding()
             .padding(horizontal = if (isTablet) 12.dp else 8.dp, vertical = 12.dp),
     ) {
-        CalendarTitle(isDarkTheme = isDarkTheme, onThemeToggle = onThemeToggle)
+        CalendarTitle(onDataRequestsClick = onDataRequestsClick)
         Spacer(Modifier.height(if (isTablet) 16.dp else 20.dp))
         CalendarCard(
             state = state,
@@ -302,15 +346,13 @@ private fun StackedCalendar(
         Spacer(Modifier.height(16.dp))
         SelectedDayPanel(
             state = state,
-            onUsernameChange = onUsernameChange,
-            onSyncClick = onSyncClick,
             modifier = if (isTablet) Modifier.weight(1f) else Modifier.heightIn(min = 280.dp, max = 480.dp),
         )
     }
 }
 
 @Composable
-private fun CalendarTitle(isDarkTheme: Boolean, onThemeToggle: () -> Unit) {
+private fun CalendarTitle(onDataRequestsClick: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "CAnime Takvim",
@@ -320,15 +362,10 @@ private fun CalendarTitle(isDarkTheme: Boolean, onThemeToggle: () -> Unit) {
             color = MaterialTheme.colorScheme.onBackground,
         )
         TextButton(
-            onClick = onThemeToggle,
-            modifier = Modifier.semantics {
-                contentDescription = if (isDarkTheme) "Açık temaya geç" else "Koyu temaya geç"
-            },
+            onClick = onDataRequestsClick,
+            modifier = Modifier.semantics { contentDescription = "Veri işlemlerini aç" },
         ) {
-            Text(
-                text = if (isDarkTheme) "☀ Açık tema" else "☾ Koyu tema",
-                color = PastelBlue,
-            )
+            Text("⚙", color = PastelBlue, style = MaterialTheme.typography.titleLarge)
         }
     }
     Text(
@@ -336,6 +373,27 @@ private fun CalendarTitle(isDarkTheme: Boolean, onThemeToggle: () -> Unit) {
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+@Composable
+private fun DataRequestsTitle(
+    onBackClick: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(
+            onClick = onBackClick,
+            modifier = Modifier.semantics { contentDescription = "Takvime dön" },
+        ) {
+            Text("‹ Takvim", color = PastelBlue)
+        }
+        Text(
+            text = "Veri işlemleri",
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+        )
+    }
 }
 
 @Composable
@@ -549,8 +607,6 @@ fun CalendarDayCell(
 @Composable
 private fun SelectedDayPanel(
     state: CalendarUiState,
-    onUsernameChange: (String) -> Unit,
-    onSyncClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val selectedCharacters = state.birthdaysByDay[state.selectedDate.dayOfMonth].orEmpty()
@@ -566,36 +622,6 @@ private fun SelectedDayPanel(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = state.username,
-                    onValueChange = onUsernameChange,
-                    modifier = Modifier.weight(1f),
-                    label = { Text("AniList kullanıcı adı") },
-                    singleLine = true,
-                    enabled = !state.isSyncing,
-                )
-                TextButton(onClick = onSyncClick, enabled = !state.isSyncing) {
-                    if (state.isSyncing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(22.dp),
-                            strokeWidth = 2.dp,
-                            color = PastelBlue,
-                        )
-                    } else {
-                        Text("Senkronize et", color = PastelBlue)
-                    }
-                }
-            }
-            state.syncError?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
-            state.syncMessage?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-            }
             Text(
                 text = state.selectedDate.format(FullDateFormatter).replaceFirstChar {
                     it.titlecase(TurkishLocale)
@@ -606,7 +632,7 @@ private fun SelectedDayPanel(
             if (selectedCharacters.isEmpty()) {
                 Text(
                     text = if (state.username.isBlank()) {
-                        "Doğum günlerini görmek için AniList kullanıcı adınızı girip senkronize edin."
+                        "Doğum günlerini görmek için Veri sekmesinden AniList verilerinizi senkronize edin."
                     } else {
                         "Bu tarihte listenizdeki yapımlardan doğan bir karakter bulunamadı."
                     },

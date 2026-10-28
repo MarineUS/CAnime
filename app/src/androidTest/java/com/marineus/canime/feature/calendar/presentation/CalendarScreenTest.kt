@@ -80,9 +80,32 @@ class CalendarScreenTest {
             }
         }
 
+        composeRule.onNodeWithContentDescription("Veri işlemlerini aç").performClick()
         composeRule.onNodeWithContentDescription("Koyu temaya geç").performClick()
 
         composeRule.runOnIdle { assertEquals(1, toggleClicks) }
+    }
+
+    @Test
+    fun dataTabShowsModularAniListRequest() {
+        composeRule.setContent {
+            CAnimeTheme(dynamicColor = false) {
+                CalendarScreen(
+                    state = previewState(),
+                    onPreviousMonth = {},
+                    onNextMonth = {},
+                    onTodayClick = {},
+                    onDateSelected = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Veri işlemlerini aç").performClick()
+
+        composeRule.onNodeWithText("Veri işlemleri").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Takvime dön").assertIsDisplayed()
+        composeRule.onNodeWithText("Kullanıcı adıyla veri çek").performClick()
+        composeRule.onNodeWithText("AniList kullanıcı adı").assertIsDisplayed()
     }
 
     private fun previewState() = CalendarUiState(
