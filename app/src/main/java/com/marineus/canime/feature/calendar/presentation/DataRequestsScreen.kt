@@ -1,7 +1,6 @@
 package com.marineus.canime.feature.calendar.presentation
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,7 +17,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
@@ -27,7 +25,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -55,7 +52,6 @@ fun DataRequestsScreen(
     onThemeToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val uriHandler = LocalUriHandler.current
     LazyColumn(
         modifier = modifier.padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -81,7 +77,6 @@ fun DataRequestsScreen(
             Text(
                 text = "Karakter verileri: AniList · Eksik doğum günleri: mikai.me",
                 modifier = Modifier
-                    .clickable { uriHandler.openUri("https://mikai.me") }
                     .padding(start = 4.dp, end = 4.dp, bottom = 16.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -119,10 +114,13 @@ private fun DataRequestCard(request: DataRequestItem) {
                         singleLine = true,
                         enabled = !request.isRunning,
                     )
-                    TextButton(onClick = request.onRun, enabled = !request.isRunning) {
-                        if (request.isRunning) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, color = PastelBlue)
-                        } else Text(request.actionLabel, color = PastelBlue)
+                    FilledTonalButton(
+                        onClick = request.onRun,
+                        enabled = !request.isRunning,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (request.isRunning) CircularProgressIndicator(strokeWidth = 2.dp, color = PastelBlue)
+                        else Text(request.actionLabel)
                     }
                 }
             }

@@ -37,7 +37,9 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Button
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,6 +70,8 @@ import com.marineus.canime.feature.calendar.model.CalendarDay
 import com.marineus.canime.feature.calendar.model.CalendarMonthFactory
 import com.marineus.canime.feature.calendar.model.BirthdayCharacter
 import com.marineus.canime.feature.calendar.data.BirthdayRepository
+import com.marineus.canime.feature.calendar.data.CalendarDataStats
+import com.marineus.canime.feature.calendar.data.SyncProgress
 import com.marineus.canime.ui.theme.CAnimeTheme
 import com.marineus.canime.ui.theme.OnPastelBlue
 import com.marineus.canime.ui.theme.PastelBlue
@@ -77,6 +81,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 private val TurkishLocale = Locale.forLanguageTag("tr-TR")
 private val MonthFormatter = DateTimeFormatter.ofPattern("MMMM yyyy", TurkishLocale)
@@ -102,17 +107,29 @@ fun CalendarRoute(
     var syncMessage by remember { mutableStateOf<String?>(null) }
     var syncError by remember { mutableStateOf<String?>(null) }
     var cacheRevision by remember { mutableLongStateOf(0L) }
+    var dataStats by remember { mutableStateOf(CalendarDataStats()) }
+    var showInitialSetup by remember { mutableStateOf(true) }
+    var syncProgress by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(Unit) {
+        showInitialSetup = !repository.hasCatalog()
+    }
 
     val displayedMonth = YearMonth.of(
         Math.floorDiv(displayedMonthValue, 12L).toInt(),
         Math.floorMod(displayedMonthValue, 12L).toInt() + 1,
     )
     val selectedDate = LocalDate.ofEpochDay(selectedDateValue)
+    fun moveToMonth(month: YearMonth) {
+        displayedMonthValue = month.toEpochMonth()
+        selectedDateValue = month.atDay(selectedDate.dayOfMonth.coerceAtMost(month.lengthOfMonth())).toEpochDay()
+    }
 
     LaunchedEffect(activeUsername, displayedMonth, cacheRevision) {
         birthdaysByDay = repository
             .charactersForMonth(activeUsername, displayedMonth.monthValue)
             .groupBy { it.birthDay }
+        dataStats = repository.stats(activeUsername)
     }
 
     val uiState = CalendarUiState(
@@ -124,12 +141,71 @@ fun CalendarRoute(
         isSyncing = isSyncing,
         syncMessage = syncMessage,
         syncError = syncError,
+        dataStats = dataStats,
+        showInitialSetup = showInitialSetup,
+        syncProgress = syncProgress,
     )
+    val startSync: () -> Unit = {
+        if (username.isBlank()) {
+            syncError = "AniList kullanıcı adını girin."
+        } else if (!isSyncing) {
+            scope.launch {
+                isSyncing = true
+                syncProgress = 0f
+                syncError = null
+                syncMessage = "Yeni eserler ve eksik doğum günleri kontrol ediliyor…"
+                try {
+                    val summary = repository.sync(username) { progress: SyncProgress ->
+                        syncProgress = progress.fraction
+                        syncMessage = progress.message
+                    }
+                    activeUsername = username.trim()
+                    dataStats = summary.stats
+                    cacheRevision++
+                    showInitialSetup = false
+                    syncMessage = if (summary.addedCharacters == 0) {
+                        "Yeni karakter eklenmedi."
+                    } else {
+                        "${summary.addedCharacters} yeni karakter eklendi."
+                    }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (error: Exception) {
+                    syncError = error.message ?: "Karakter verileri alınamadı."
+                } finally {
+                    isSyncing = false
+                }
+            }
+        }
+    }
+    val prepareCatalog: () -> Unit = {
+        if (!isSyncing) {
+            scope.launch {
+                isSyncing = true
+                syncProgress = 0f
+                syncError = null
+                try {
+                    val count = repository.prepareCatalog { progress ->
+                        syncProgress = progress.fraction
+                        syncMessage = progress.message
+                    }
+                    syncMessage = "$count karakterin doğum günü verisi hazırlandı."
+                    showInitialSetup = false
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (error: Exception) {
+                    syncError = error.message ?: "Genel karakter verileri alınamadı."
+                } finally {
+                    isSyncing = false
+                }
+            }
+        }
+    }
 
     CalendarScreen(
         state = uiState,
-        onPreviousMonth = { displayedMonthValue-- },
-        onNextMonth = { displayedMonthValue++ },
+        onPreviousMonth = { moveToMonth(displayedMonth.minusMonths(1)) },
+        onNextMonth = { moveToMonth(displayedMonth.plusMonths(1)) },
         onTodayClick = {
             displayedMonthValue = YearMonth.from(today).toEpochMonth()
             selectedDateValue = today.toEpochDay()
@@ -144,27 +220,8 @@ fun CalendarRoute(
             username = it
             syncError = null
         },
-        onSyncClick = {
-            if (username.isBlank()) {
-                syncError = "AniList kullanıcı adını girin."
-            } else if (!isSyncing) {
-                scope.launch {
-                    isSyncing = true
-                    syncError = null
-                    syncMessage = "Anime ve manga listeniz AniList'ten alınıyor…"
-                    runCatching { repository.sync(username) }
-                        .onSuccess { characterCount ->
-                            activeUsername = username.trim()
-                            cacheRevision++
-                            syncMessage = "$characterCount karakter yerel olarak kaydedildi."
-                        }
-                        .onFailure { error ->
-                            syncError = error.message ?: "AniList verisi alınamadı."
-                        }
-                    isSyncing = false
-                }
-            }
-        },
+        onSyncClick = startSync,
+        onPrepareCatalog = prepareCatalog,
         modifier = modifier,
     )
 }
@@ -176,14 +233,25 @@ fun CalendarScreen(
     onNextMonth: () -> Unit,
     onTodayClick: () -> Unit,
     onDateSelected: (LocalDate) -> Unit,
+    modifier: Modifier = Modifier,
     isDarkTheme: Boolean = false,
     onThemeToggle: () -> Unit = {},
     onUsernameChange: (String) -> Unit = {},
     onSyncClick: () -> Unit = {},
-    modifier: Modifier = Modifier,
+    onPrepareCatalog: () -> Unit = {},
 ) {
     var showDataRequests by rememberSaveable { mutableStateOf(false) }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        if (state.showInitialSetup) {
+            InitialDataSetup(
+                isSyncing = state.isSyncing,
+                progress = state.syncProgress,
+                message = state.syncMessage,
+                error = state.syncError,
+                onStart = onPrepareCatalog,
+            )
+            return@Surface
+        }
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val isTablet = minOf(maxWidth, maxHeight) >= 600.dp
             AnimatedContent(
@@ -265,6 +333,58 @@ fun CalendarScreen(
 }
 
 @Composable
+private fun InitialDataSetup(
+    isSyncing: Boolean,
+    progress: Float,
+    message: String?,
+    error: String?,
+    onStart: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxSize().statusBarsPadding().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth().width(520.dp),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text("Takviminizi hazırlayalım", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Anime ve manga karakterlerinin ulaşılabilen doğum günü bilgileri ortak kataloğa alınacak. AniList kullanıcı adınızı daha sonra Veri bölümünden girebilirsiniz.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (isSyncing) {
+                    LinearProgressIndicator(
+                        progress = { progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().semantics {
+                            contentDescription = "Veri hazırlama ilerlemesi"
+                        },
+                    )
+                    Text(
+                        message ?: "Veriler hazırlanıyor…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    Button(
+                        onClick = onStart,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Karakter verilerini hazırla") }
+                }
+                error?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun LandscapeTabletCalendar(
     state: CalendarUiState,
     maxScreenWidth: Dp,
@@ -287,7 +407,10 @@ private fun LandscapeTabletCalendar(
             .statusBarsPadding()
             .padding(horizontal = 12.dp, vertical = 16.dp),
     ) {
-        CalendarTitle(onDataRequestsClick = onDataRequestsClick)
+        CalendarTitle(
+            characterCount = state.dataStats.totalCharacters,
+            onDataRequestsClick = onDataRequestsClick,
+        )
         Spacer(Modifier.height(14.dp))
         Row(
             modifier = Modifier.fillMaxSize(),
@@ -334,7 +457,10 @@ private fun StackedCalendar(
             .statusBarsPadding()
             .padding(horizontal = if (isTablet) 12.dp else 8.dp, vertical = 12.dp),
     ) {
-        CalendarTitle(onDataRequestsClick = onDataRequestsClick)
+        CalendarTitle(
+            characterCount = state.dataStats.totalCharacters,
+            onDataRequestsClick = onDataRequestsClick,
+        )
         Spacer(Modifier.height(if (isTablet) 16.dp else 20.dp))
         CalendarCard(
             state = state,
@@ -352,7 +478,7 @@ private fun StackedCalendar(
 }
 
 @Composable
-private fun CalendarTitle(onDataRequestsClick: () -> Unit) {
+private fun CalendarTitle(characterCount: Int, onDataRequestsClick: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "CAnime Takvim",
@@ -369,7 +495,7 @@ private fun CalendarTitle(onDataRequestsClick: () -> Unit) {
         }
     }
     Text(
-        text = "Anime dünyasındaki özel günler burada.",
+        text = "Takvimde $characterCount karakter · Anime dünyasındaki özel günler burada.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

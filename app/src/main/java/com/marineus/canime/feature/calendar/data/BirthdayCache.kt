@@ -34,6 +34,15 @@ internal class BirthdayCache(context: Context) :
         )
         database.execSQL(
             """
+            CREATE TABLE synced_media (
+                username TEXT NOT NULL,
+                media_id INTEGER NOT NULL,
+                PRIMARY KEY (username, media_id)
+            )
+            """.trimIndent(),
+        )
+        database.execSQL(
+            """
             CREATE TABLE unresolved_character (
                 username TEXT NOT NULL,
                 character_id INTEGER NOT NULL,
@@ -41,6 +50,8 @@ internal class BirthdayCache(context: Context) :
                 image_url TEXT,
                 site_url TEXT,
                 media_titles TEXT NOT NULL,
+                media_ids TEXT NOT NULL,
+                character_role TEXT NOT NULL,
                 last_checked_at INTEGER,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (username, character_id)
@@ -84,12 +95,41 @@ internal class BirthdayCache(context: Context) :
                 """.trimIndent(),
             )
         }
+        if (oldVersion < 3) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS synced_media (
+                    username TEXT NOT NULL,
+                    media_id INTEGER NOT NULL,
+                    PRIMARY KEY (username, media_id)
+                )
+                """.trimIndent(),
+            )
+        }
+        if (oldVersion < 4) {
+            // Older versions queued every background/unnamed character. Preserve resolved
+            // birthdays, but rebuild the media checkpoint and unresolved queue with role filtering.
+            database.delete("unresolved_character", null, null)
+            database.delete("synced_media", null, null)
+        }
+        if (oldVersion < 5) {
+            database.execSQL(
+                "ALTER TABLE unresolved_character ADD COLUMN media_ids TEXT NOT NULL DEFAULT '[]'",
+            )
+            database.execSQL(
+                "ALTER TABLE unresolved_character ADD COLUMN character_role TEXT NOT NULL DEFAULT 'SUPPORTING'",
+            )
+            // Rebuild once so every queued item has media context and a trustworthy role.
+            database.delete("unresolved_character", null, null)
+            database.delete("synced_media", null, null)
+        }
+        // Version 6 retires the inaccessible ACDB network source without changing user data.
     }
 
     fun replaceUserCharacters(
         username: String,
         characters: List<BirthdayCharacter>,
-        mikaiCharacterIds: Set<Int> = emptySet(),
+        fallbackSources: Map<Int, BirthdaySource> = emptyMap(),
     ) {
         writableDatabase.inTransaction {
             delete("birthday_character", "username = ?", arrayOf(username))
@@ -106,7 +146,7 @@ internal class BirthdayCache(context: Context) :
                         put("birth_day", character.birthDay)
                         put("site_url", character.siteUrl)
                         put("media_titles", JSONArray(character.mediaTitles).toString())
-                        put("birthday_source", if (character.id in mikaiCharacterIds) "MIKAI" else "ANILIST")
+                        put("birthday_source", (fallbackSources[character.id] ?: BirthdaySource.ANILIST).name)
                         put("confidence", "HIGH")
                         put("verified_at", System.currentTimeMillis())
                     },
@@ -124,26 +164,92 @@ internal class BirthdayCache(context: Context) :
         }
     }
 
-    fun getMikaiCharacters(username: String): List<BirthdayCharacter> = queryCharacters(
-        selection = "username = ? AND birthday_source = ?",
-        selectionArgs = arrayOf(username, "MIKAI"),
+    fun getFallbackCharacters(username: String): List<BirthdayCharacter> = queryCharacters(
+        selection = "username = ? AND birthday_source != ?",
+        selectionArgs = arrayOf(username, BirthdaySource.ANILIST.name),
     )
+
+    fun getCharactersFromSource(username: String, source: BirthdaySource): List<BirthdayCharacter> = queryCharacters(
+        selection = "username = ? AND birthday_source = ?",
+        selectionArgs = arrayOf(username, source.name),
+    )
+
+    fun getAllCharacters(username: String): List<BirthdayCharacter> = queryCharacters(
+        selection = "username = ?",
+        selectionArgs = arrayOf(username),
+    )
+
+    fun getCharacterIds(username: String): Set<Int> = readableDatabase.query(
+        "birthday_character",
+        arrayOf("character_id"),
+        "username = ?",
+        arrayOf(username),
+        null,
+        null,
+        null,
+    ).use { cursor -> buildSet { while (cursor.moveToNext()) add(cursor.getInt(0)) } }
+
+    fun getStats(username: String): CalendarDataStats {
+        val total = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM birthday_character WHERE username = ?",
+            arrayOf(username),
+        ).use { cursor ->
+            cursor.moveToFirst()
+            cursor.getInt(0)
+        }
+        return CalendarDataStats(totalCharacters = total)
+    }
+
+    fun getSyncedMediaIds(username: String): Set<Int> = readableDatabase.query(
+        "synced_media",
+        arrayOf("media_id"),
+        "username = ?",
+        arrayOf(username),
+        null,
+        null,
+        null,
+    ).use { cursor -> buildSet { while (cursor.moveToNext()) add(cursor.getInt(0)) } }
+
+    fun saveSyncedMediaIds(username: String, mediaIds: Set<Int>, replace: Boolean) {
+        writableDatabase.inTransaction {
+            if (replace) delete("synced_media", "username = ?", arrayOf(username))
+            mediaIds.forEach { mediaId ->
+                insertWithOnConflict(
+                    "synced_media",
+                    null,
+                    ContentValues().apply {
+                        put("username", username)
+                        put("media_id", mediaId)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+            }
+        }
+    }
 
     fun upsertUnresolved(username: String, characters: List<MissingBirthdayCharacter>) {
         writableDatabase.inTransaction {
             characters.forEach { character ->
-                insertWithOnConflict(
+                val values = ContentValues().apply {
+                    put("username", username)
+                    put("character_id", character.id)
+                    put("name", character.name)
+                    put("image_url", character.imageUrl)
+                    put("site_url", character.siteUrl)
+                    put("media_titles", JSONArray(character.mediaTitles).toString())
+                    put("media_ids", JSONArray(character.mediaIds).toString())
+                    put("character_role", character.role)
+                }
+                val updated = update(
+                    "unresolved_character",
+                    values,
+                    "username = ? AND character_id = ?",
+                    arrayOf(username, character.id.toString()),
+                )
+                if (updated == 0) insertOrThrow(
                     "unresolved_character",
                     null,
-                    ContentValues().apply {
-                        put("username", username)
-                        put("character_id", character.id)
-                        put("name", character.name)
-                        put("image_url", character.imageUrl)
-                        put("site_url", character.siteUrl)
-                        put("media_titles", JSONArray(character.mediaTitles).toString())
-                    },
-                    SQLiteDatabase.CONFLICT_IGNORE,
+                    values,
                 )
             }
         }
@@ -152,17 +258,21 @@ internal class BirthdayCache(context: Context) :
     fun unresolvedDue(username: String, limit: Int, retryBefore: Long): List<MissingBirthdayCharacter> {
         readableDatabase.query(
             "unresolved_character",
-            arrayOf("character_id", "name", "image_url", "site_url", "media_titles"),
+            arrayOf(
+                "character_id", "name", "image_url", "site_url", "media_titles", "media_ids", "character_role",
+            ),
             "username = ? AND (last_checked_at IS NULL OR last_checked_at < ?)",
             arrayOf(username, retryBefore.toString()),
             null,
             null,
-            "attempt_count ASC, character_id ASC",
+            "CASE character_role WHEN 'MAIN' THEN 0 WHEN 'SUPPORTING' THEN 1 ELSE 2 END, " +
+                "attempt_count ASC, character_id ASC",
             limit.toString(),
         ).use { cursor ->
             return buildList {
                 while (cursor.moveToNext()) {
                     val titles = JSONArray(cursor.getString(4))
+                    val mediaIds = JSONArray(cursor.getString(5))
                     add(
                         MissingBirthdayCharacter(
                             id = cursor.getInt(0),
@@ -172,6 +282,10 @@ internal class BirthdayCache(context: Context) :
                             mediaTitles = buildList {
                                 repeat(titles.length()) { index -> add(titles.getString(index)) }
                             },
+                            mediaIds = buildList {
+                                repeat(mediaIds.length()) { index -> add(mediaIds.getInt(index)) }
+                            },
+                            role = cursor.getString(6),
                         ),
                     )
                 }
@@ -248,7 +362,7 @@ internal class BirthdayCache(context: Context) :
 
     private companion object {
         const val DATABASE_NAME = "birthday_cache.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 6
         val COLUMNS = arrayOf(
             "character_id",
             "name",
